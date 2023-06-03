@@ -1,0 +1,5 @@
+[workspace]
+members = [
+  "generic-question",
+  "should-load"
+]
