@@ -7,6 +7,7 @@ use serde::{de::DeserializeOwned, Serialize};
 // write sufficient testing to show you implementation works
 // Where necessary, any other changes may be made
 
+#[derive(Debug)]
 pub enum Error {
     KeyNotPresentInMap { key: Vec<u8> },
     EmptyValue { key: Vec<u8> },

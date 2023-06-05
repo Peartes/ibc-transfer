@@ -1,5 +1,6 @@
 [workspace]
 members = [
   "generic-question",
-  "should-load"
+  "should-load",
+  "finally-a-contract/ibc-transfer"
 ]
