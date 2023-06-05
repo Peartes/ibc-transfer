@@ -93,7 +93,9 @@ mod tests {
     use std::ops::Mul;
 
     use crate::execute::{transfer_ibc_token, handle_transfer_ibc_token_reply, receive_ibc_token, recover};
+    use crate::ibc_lifecycle::receive_ack;
     use crate::proto::*;
+    use crate::state::ibc::IBCTransfer;
     use crate::state::{TRANSFER_REPLY_STATE, TransferMsgReplyState, ibc, INFLIGHT_PACKETS, SEND_EXTERNAL_TOKENS_REPLY_STATE, RECOVERY_STATES};
 
     use super::*;
@@ -448,5 +450,91 @@ mod tests {
         // Try non-existing recovery
         let hacker = deps.api.addr_validate("unexisting_sender").unwrap();
         recover(deps.as_mut(), hacker).expect_err("recover should fail on non-existing recovery");
+    }
+
+    #[test]
+    fn receive_ack_test() {
+        let mut deps = mock_dependencies();
+
+        let env = mock_env();
+        let info = mock_info("sender", &[Coin::new(50, "token")]);
+        let amount = Coin::new(100, "token");
+        let sequence = 1;
+        let channel_id = 0;
+
+        // Instantiate the contract
+        instantiate(deps.as_mut(), env.clone(), info.clone(), InstantiateMsg {  }).expect("contract instantiate fine");
+
+        let inflight_packet = ibc::IBCTransfer {
+            recovery_addr: info.clone().sender,
+            channel_id: channel_id.to_string(),
+            sequence,
+            amount: amount.amount.u128(),
+            denom: amount.denom.to_string(),
+            status: ibc::PacketLifecycleStatus::Sent,
+        };
+        INFLIGHT_PACKETS
+            .save(deps.as_mut().storage, (&channel_id.to_string(), sequence), &inflight_packet)
+            .unwrap();
+
+        // Execute the contract function
+        let res = receive_ack(
+            deps.as_mut(),
+            channel_id.to_string(),
+            sequence,
+            "acknowledged".to_string(),
+            true,
+        ).expect("receive ack should succeed");
+
+        // Assert response
+        assert_eq!(
+            res,
+            Response::new().add_attribute("contract", "ibc_transfer").add_attribute("action", "receive_ack").add_attribute("msg", "packet successfully delivered")
+        );
+
+        // Assert storage changes
+        assert_eq!(
+            INFLIGHT_PACKETS
+                .may_load(deps.as_ref().storage, (&channel_id.to_string(), sequence))
+                .unwrap(),
+            Some(ibc::IBCTransfer {
+                recovery_addr: info.clone().sender,
+                channel_id: channel_id.to_string(),
+                sequence,
+                amount: amount.amount.u128(),
+                denom: amount.denom.to_string(),
+                status: ibc::PacketLifecycleStatus::AwaitingResponse,
+            })
+        );
+
+        // Test Failed ack
+        let res = receive_ack(
+            deps.as_mut(),
+            channel_id.to_string(),
+            sequence,
+            "failed".to_string(),
+            false,
+        ).expect("receive ack should succeed");
+
+        // Assert response
+        assert_eq!(
+            res,
+            Response::new().add_attribute("contract", "ibc_transfer").add_attribute("action", "receive_ack").add_attribute("msg", "recovery stored").add_attribute("recovery_addr", info.clone().sender.to_string())
+        );
+         // Assert storage changes
+        assert_eq!(
+            RECOVERY_STATES
+                .may_load(deps.as_ref().storage, &info.sender)
+                .unwrap(),
+            Some(vec![IBCTransfer {
+                recovery_addr: info.clone().sender,
+                channel_id: channel_id.to_string(),
+                sequence,
+                amount: amount.amount.u128(),
+                denom: amount.denom.to_string(),
+                status: ibc::PacketLifecycleStatus::AckFailure
+            }])
+        );
+
     }
 }
