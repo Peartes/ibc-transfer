@@ -1,99 +1,136 @@
-# CosmWasm Starter Pack
+# IBC Transfer Contract
 
-This is a template to build smart contracts in Rust to run inside a
-[Cosmos SDK](https://github.com/cosmos/cosmos-sdk) module on all chains that enable it.
-To understand the framework better, please read the overview in the
-[cosmwasm repo](https://github.com/CosmWasm/cosmwasm/blob/master/README.md),
-and dig into the [cosmwasm docs](https://www.cosmwasm.com).
-This assumes you understand the theory and just want to get coding.
+This repository contains a smart contract written in CosmWasm that enables IBC token transfers. The contract allows users to send tokens to an external address via the smart contract and receive multiplied funds back. It assumes the underlying chain has integrated the `Ibc-hooks` module by Osmosis.
 
-## Creating a new repo from template
+## Functionality
 
-Assuming you have a recent version of Rust and Cargo installed
-(via [rustup](https://rustup.rs/)),
-then the following should get you a new repo to start a contract:
+The contract provides the following functionality:
 
-Install [cargo-generate](https://github.com/ashleygwilliams/cargo-generate) and cargo-run-script.
-Unless you did that before, run this line now:
+- Accepts tokens from users.
+- Sends tokens over IBC to a predetermined address, port, and channels.
+- Supports adding new addresses, ports, and channels as an admin for users to send funds to.
+- Receives funds from the external address.
+- Returns the multiplied funds to the user.
 
-```sh
-cargo install cargo-generate --features vendored-openssl
-cargo install cargo-run-script
+## Assumptions
+
+The contract makes the following assumptions:
+
+- The external address always sends funds sequentially, with the first user to send funds being the first to receive multiplied funds.
+
+## Design Overview
+The contract is designed to be deployed on a Cosmos SDK-based chain that supports x/wasm and has integrated the `Ibc-hooks` module. It is written in Rust using the CosmWasm framework.
+The contract receives user funds and creates an IBCTransfer message according to [ics-20](https://github.com/cosmos/ibc/blob/main/spec/app/ics-020-fungible-token-transfer/README.md) specification and broadcasts the message to the IBC module. The IBC module sends the message to the external address over a pre-determined (port, channel) combination. 
+The external address sends the funds (2x more than the original funds) back to the contract, which triggers the contract execution using the ibc-hooks module. 
+The contract then returns the multiplied funds to the initial user.
+
+## Contract States
+The contract has the following states:
+
+**Config**: Stores the admin address allowed to add new addresses, ports, and channels. Set to the address that deploys the contract.
+
+**EXTERNAL ADDRESSES**: A map of address alias to the external address to send funds to. e.g 
+``` JSON
+    {"cosmos_hub": "cosmos1...","quasar": "quasar..."}
 ```
 
-Now, use it to create your new contract.
-Go to the folder in which you want to place it and run:
-
-**Latest**
-
-```sh
-cargo generate --git https://github.com/CosmWasm/cw-template.git --name PROJECT_NAME
+**CHANNELS**: A map of address alias to the channel to send funds to. e.g 
+``` JSON
+    {"cosmos_hub": "channel-0","quasar": "channel-1"}
 ```
 
-For cloning minimal code repo:
-
-```sh
-cargo generate --git https://github.com/CosmWasm/cw-template.git --name PROJECT_NAME -d minimal=true
+**PORTS**: A map of address alias to the port to send funds to. e.g 
+``` JSON
+    {"cosmos_hub": "transfer","quasar": "movement"}
 ```
 
-**Older Version**
+**TRANSFER_REPLY_STATE**: In order to keep context between sub-message calls which happen when we send the IBC transfer message, we store some details of the transfer message. This is done by storing a `TransferMsgReplyState` struct in the contract state defined as follows:
+``` Rust
+    pub struct TransferMsgReplyState {
+        pub channel_id: String,
+        pub to_address: String,
+        pub amount: u128,
+        pub denom: String,
+        pub sender: Addr,
+    }
+```
+This allows us to keep track of an ongoing transfer. The sender field is populated as the sender of the transfer tx
 
-Pass version as branch flag:
-
-```sh
-cargo generate --git https://github.com/CosmWasm/cw-template.git --branch <version> --name PROJECT_NAME
+**INFLIGHT_PACKETS**: A map of (channel_id, sequence) to the `IBCTransfer` struct (an ibc transfer msg packet). This is used to keep track of the inflight packets. Whenever an IBC transfer is sent successfully, the packet is added to this map to keep track of all ongoing transfers in the contract. The `IBCTransfer` struct is defined as follows:
+``` Rust
+    pub struct IBCTransfer {
+        pub channel_id: String,
+        pub sequence: u64,
+        pub denom: String,
+        pub amount: u128,
+        pub sender: Addr,
+        pub receiver: Addr,
+    }
+```
+When the reply from the ibc transfer sub-msg is returned which is of the form
+``` Rust
+    pub struct TransferMsgReply {
+        pub sequence: u64,
+    }
+```
+the packet details are stored in the `INFLIGHT_PACKETS` map using the (channel_id, sequence) key.
+When the response from the IBC transfer msg is returned to the contract (from the external address) through the `ibc-hooks`, this map is used to retrieve (using the (channel_id, sequence)) the appropriate user to send the accompanying funds to 
+The interface of the called in execute msg by the external address (sent as the body of the wasm execute msg defined below )
+```JSON
+    "ReceiveToken": {
+        "channel": "String", // channel id of the initial transfer
+        "sequence": "u64", // sequence number of the packet
+    }
 ```
 
-Example:
+**RECOVERY_STATES**: This is used as a failsafe to enable users recover their funds from the contract in case of a failed transaction. This scenario could occur when a user sends funds to the contract and the contract is unable to send the funds to the external address either because of some encoding issue or even light client expiration. In this case, the packet is stored in this state to keep track of re-claimable funds then the user can call the `recover` function to recover their funds. The `RECOVERY_STATES` map is used to keep track of the recovery states. The key is the sender address (the sender who had originally initiated the tx) of the transfer packet and the value is the `IBCTransfer` struct defined above already.
 
-```sh
-cargo generate --git https://github.com/CosmWasm/cw-template.git --branch 0.16 --name PROJECT_NAME
-```
+**SEND_EXTERNAL_TOKENS_REPLY_STATE**: This state keeps context between cosmos Bank sub-msg used to transfer the funds returned from the external account to the appropriate user. Should the transfer fail (which is highly unlikely), this state is used to keep track of the particular tx. The funds are then moved into the recovery state already discussed to allow a user to re-try moving the funds again. This state is a bit redundant and with appropriate guarantees can be removed
+## Getting Started
 
-You will now have a new folder called `PROJECT_NAME` (I hope you changed that to something else)
-containing a simple working contract and build system that you can customize.
+To get started with this contract, follow the steps below:
 
-## Create a Repo
+### Prerequisites
 
-After generating, you have a initialized local git repo, but no commits, and no remote.
-Go to a server (eg. github) and create a new upstream repo (called `YOUR-GIT-URL` below).
-Then run the following:
+- Ensure you have a Cosmos SDK-based chain that supports x/wasm and has integrated the `Ibc-hooks` module.
 
-```sh
-# this is needed to create a valid Cargo.lock file (see below)
-cargo check
-git branch -M main
-git add .
-git commit -m 'Initial Commit'
-git remote add origin YOUR-GIT-URL
-git push -u origin main
-```
+### Installation
 
-## CI Support
+1. Clone this repository:
 
-We have template configurations for both [GitHub Actions](.github/workflows/Basic.yml)
-and [Circle CI](.circleci/config.yml) in the generated project, so you can
-get up and running with CI right away.
+   ```shell
+   git clone https://github.com/peartes/ibc-transfer.git
+   ```
 
-One note is that the CI runs all `cargo` commands
-with `--locked` to ensure it uses the exact same versions as you have locally. This also means
-you must have an up-to-date `Cargo.lock` file, which is not auto-generated.
-The first time you set up the project (or after adding any dep), you should ensure the
-`Cargo.lock` file is updated, so the CI will test properly. This can be done simply by
-running `cargo check` or `cargo unit-test`.
+   ```shell
+   cd ibc-transfer-contract/finally-a-contract
+   cargo wasm
+    ```
 
-## Using your project
+### Testing
+To run the tests for the contract, execute the following command:
+    
+    ```shell
+    cargo test
+    ```
 
-Once you have your custom repo, you should check out [Developing](./Developing.md) to explain
-more on how to run tests and develop code. Or go through the
-[online tutorial](https://docs.cosmwasm.com/) to get a better feel
-of how to develop.
+### Usage
+To use the IBC transfer contract, you need to deploy it on your Cosmos SDK-based chain and interact with it using transactions. Here is an overview of the contract's usage:
 
-[Publishing](./Publishing.md) contains useful information on how to publish your contract
-to the world, once you are ready to deploy it on a running blockchain. And
-[Importing](./Importing.md) contains information about pulling in other contracts or crates
-that have been published.
+- Deploy the contract on your chain.
 
-Please replace this README file with information about your specific project. You can keep
-the `Developing.md` and `Publishing.md` files as useful referenced, but please set some
-proper description in the README.
+- As an admin, configure the predetermined address, port, and channels for receiving funds from users.
+
+- Users can now send tokens to the provided addresses, ports, and channels using the appropriate IBC transfer commands.
+
+- The external address receives the funds and triggers the contract execution using the ibc-hooks module.
+
+- The contract multiplies the received funds and returns them to the initial user.
+
+### Contributors
+Kehinde Faleye <kenny.fale.kf@gmail.com>
+Please feel free to contribute to this project by submitting pull requests with improvements or additional features.
+
+License
+This project is licensed under the MIT License - see the LICENSE file for details.
+
