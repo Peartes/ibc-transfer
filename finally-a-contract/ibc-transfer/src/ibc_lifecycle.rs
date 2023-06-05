@@ -98,7 +98,7 @@ pub fn receive_timeout(
     sequence: u64,
 ) -> Result<Response, ContractError> {
     let response = Response::new()
-        .add_attribute("contract", "crosschain_swaps")
+        .add_attribute("contract", "ibc transfer")
         .add_attribute("action", "receive_timeout");
 
     // Check if there is an inflight packet for the received (channel, sequence)
